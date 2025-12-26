@@ -1,18 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Category, IntelligenceState, FetchStatus, ViewMode } from './types';
 import { fetchMarketIntelligence } from './services/gemini';
-import { saveDailyData } from './services/db'; // Import DB Saver
+import { saveDailyData, getMissingCategoriesForDate } from './services/db';
 import IntelligenceCard from './components/IntelligenceCard';
 import DashboardStats from './components/DashboardStats';
 import SearchPage from './components/SearchPage';
-import { BriefcaseIcon, ChartIcon, FileTextIcon, TargetIcon, TrendingUpIcon } from './components/Icons';
+import { BriefcaseIcon, ChartIcon, FileTextIcon, TargetIcon, TrendingUpIcon, RefreshIcon } from './components/Icons';
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewMode>('dashboard');
   const [activeCategory, setActiveCategory] = useState<Category>(Category.TENDER);
-  
-  // Date state: Default to today
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  
+  // Auto-sync state
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ current: string, total: number, finished: number }>({
+    current: '',
+    total: 0,
+    finished: 0
+  });
 
   const [data, setData] = useState<IntelligenceState>({
     [Category.TRADING]: null,
@@ -28,34 +34,63 @@ const App: React.FC = () => {
     [Category.DEMAND]: { loading: false, error: null },
   });
 
-  const loadCategoryData = async (category: Category, date: string) => {
+  const loadCategoryData = async (category: Category, date: string, silent = false) => {
     if (status[category].loading) return;
 
-    setStatus(prev => ({ ...prev, [category]: { loading: true, error: null } }));
+    if (!silent) {
+      setStatus(prev => ({ ...prev, [category]: { loading: true, error: null } }));
+    }
 
     try {
       const result = await fetchMarketIntelligence(category, date);
-      
-      // Save to Local DB (Simulating Backend)
       if (result.items && result.items.length > 0) {
           await saveDailyData(result.items);
       }
-
       setData(prev => ({ ...prev, [category]: result }));
       setStatus(prev => ({ ...prev, [category]: { loading: false, error: null } }));
+      return result;
     } catch (error: any) {
-      setStatus(prev => ({ 
-        ...prev, 
-        [category]: { loading: false, error: error.message } 
-      }));
+      if (!silent) {
+        setStatus(prev => ({ 
+          ...prev, 
+          [category]: { loading: false, error: error.message } 
+        }));
+      }
+      throw error;
     }
   };
 
+  // Auto-Sync Effect on Mount
   useEffect(() => {
-    if (view === 'dashboard') {
+    const runAutoSync = async () => {
+      const today = new Date().toISOString().split('T')[0];
+      const missing = await getMissingCategoriesForDate(today);
+      
+      if (missing.length > 0) {
+        setIsSyncing(true);
+        setSyncProgress({ current: '', total: missing.length, finished: 0 });
+        
+        for (const cat of missing) {
+          setSyncProgress(prev => ({ ...prev, current: cat }));
+          try {
+            await loadCategoryData(cat, today, true);
+          } catch (e) {
+            console.error(`Auto-sync failed for ${cat}`, e);
+          }
+          setSyncProgress(prev => ({ ...prev, finished: prev.finished + 1 }));
+        }
+        setIsSyncing(false);
+      }
+    };
+
+    runAutoSync();
+  }, []);
+
+  // Standard category loader when active tab changes
+  useEffect(() => {
+    if (view === 'dashboard' && !data[activeCategory] && !status[activeCategory].loading) {
         loadCategoryData(activeCategory, selectedDate);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCategory, selectedDate, view]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -82,7 +117,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
             <div className="w-10 h-10 bg-primary-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-primary-500/30">
@@ -97,7 +132,6 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-4">
-             {/* Navigation Switches */}
              <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200">
                 <button 
                     onClick={() => setView('dashboard')}
@@ -113,7 +147,6 @@ const App: React.FC = () => {
                 </button>
              </div>
 
-             {/* Date Picker (Only visible on Dashboard) */}
              {view === 'dashboard' && (
                 <div className="flex items-center bg-slate-100 rounded-lg p-1 border border-slate-200">
                 <span className="px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden sm:block">日期选择</span>
@@ -128,6 +161,24 @@ const App: React.FC = () => {
              )}
           </div>
         </div>
+
+        {/* Sync Status Bar */}
+        {isSyncing && (
+          <div className="bg-primary-50 border-b border-primary-100 px-4 py-2">
+            <div className="max-w-7xl mx-auto flex items-center justify-between text-xs text-primary-700">
+              <div className="flex items-center gap-2">
+                <RefreshIcon className="w-3 h-3 animate-spin" />
+                <span>正在自动同步今日情报: <strong>{syncProgress.current}</strong> ({syncProgress.finished}/{syncProgress.total})</span>
+              </div>
+              <div className="w-48 h-1.5 bg-primary-200 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-primary-600 transition-all duration-500" 
+                  style={{ width: `${(syncProgress.finished / syncProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Main Content */}
@@ -136,7 +187,7 @@ const App: React.FC = () => {
         {view === 'search' ? (
             <SearchPage />
         ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-140px)] min-h-[600px]">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-200px)] min-h-[600px]">
             {/* Sidebar / Tabs */}
             <div className="lg:col-span-3 flex flex-col gap-6">
                 

@@ -12,7 +12,6 @@ interface MarketDB extends DBSchema {
 const DB_NAME = 'DataNexusDB';
 const STORE_NAME = 'market_items';
 
-// Initialize DB
 const initDB = async (): Promise<IDBPDatabase<MarketDB>> => {
   return openDB<MarketDB>(DB_NAME, 1, {
     upgrade(db) {
@@ -26,72 +25,51 @@ const initDB = async (): Promise<IDBPDatabase<MarketDB>> => {
   });
 };
 
-// Save a batch of items for a specific day
-// This effectively acts as "writing to that day's table"
 export const saveDailyData = async (items: MarketItem[]) => {
   const db = await initDB();
   const tx = db.transaction(STORE_NAME, 'readwrite');
   const store = tx.objectStore(STORE_NAME);
   
-  // Strategy: We don't overwrite blindly, we append. 
-  // In a real app, we might want to deduplicate based on Title + Date.
   for (const item of items) {
-    // Simple check to avoid exact duplicates on the same day if re-fetched
-    const index = store.index('by-date');
-    let exists = false;
-    
-    // Performance note: In a real backend, we'd do a count query or unique constraint.
-    // For client-side simulation, we just add them.
     await store.add(item);
   }
   await tx.done;
 };
 
-// Query Filters
 export interface QueryParams {
   startDate?: string;
   endDate?: string;
   region?: string;
-  entityKeyword?: string; // Fuzzy match for "Subject"
+  entityKeyword?: string;
   category?: Category;
 }
 
 export const queryMarketData = async (params: QueryParams): Promise<MarketItem[]> => {
   const db = await initDB();
-  const allItems = await db.getAll(STORE_NAME); // Get all and filter in memory (IndexedDB complex queries are verbose)
+  const allItems = await db.getAll(STORE_NAME);
 
   return allItems.filter(item => {
     let match = true;
-
-    // Date Range
     if (params.startDate && item.date < params.startDate) match = false;
     if (params.endDate && item.date > params.endDate) match = false;
-
-    // Category
     if (params.category && item.category !== params.category) match = false;
-
-    // Region (Exact or Partial)
     if (params.region && !item.region.includes(params.region)) match = false;
-
-    // Entity (Fuzzy)
     if (params.entityKeyword) {
       const keyword = params.entityKeyword.toLowerCase();
       const entity = (item.entity || '').toLowerCase();
       const title = (item.title || '').toLowerCase();
-      if (!entity.includes(keyword) && !title.includes(keyword)) {
-        match = false;
-      }
+      if (!entity.includes(keyword) && !title.includes(keyword)) match = false;
     }
-
     return match;
-  }).sort((a, b) => b.date.localeCompare(a.date)); // Sort newest first
+  }).sort((a, b) => b.date.localeCompare(a.date));
 };
 
-// Helper to check if we already have data for a specific date/category locally
-// to avoid API calls (optional optimization)
-export const hasDataForDate = async (date: string, category: Category): Promise<boolean> => {
+export const getMissingCategoriesForDate = async (date: string): Promise<Category[]> => {
   const db = await initDB();
-  const index = db.transaction(STORE_NAME).store.index('by-date');
+  const tx = db.transaction(STORE_NAME, 'readonly');
+  const index = tx.store.index('by-date');
   const items = await index.getAll(date);
-  return items.some(i => i.category === category);
+  
+  const categoriesPresent = new Set(items.map(i => i.category));
+  return Object.values(Category).filter(cat => !categoriesPresent.has(cat));
 };
